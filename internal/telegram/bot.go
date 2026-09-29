@@ -63,12 +63,21 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 func (b *Bot) handleMessage(update tgbotapi.Update) {
 	message := update.Message
 
-	if message.Text == "" {
+	if message == nil {
 		return
 	}
 
 	if message.IsCommand() {
 		b.handleCommand(message)
+		return
+	}
+
+	if message.Contact != nil {
+		b.handleContact(message)
+		return
+	}
+
+	if message.Text == "" {
 		return
 	}
 
@@ -79,6 +88,19 @@ func (b *Bot) handleMessage(update tgbotapi.Update) {
 		message.Text,
 	)
 
+	if result.Action == service.ActionShowKeyboard {
+		err := b.sendMessageWithReplyKeyboard(
+			chatID,
+			result.Text,
+			phoneKeyboard(),
+		)
+		if err != nil {
+			log.Println("send phone keyboard:", err)
+		}
+
+		return
+	}
+
 	if result.Text != "" {
 		if err := b.sendMessage(chatID, result.Text); err != nil {
 			log.Println("send message:", err)
@@ -88,9 +110,15 @@ func (b *Bot) handleMessage(update tgbotapi.Update) {
 	if result.Request != nil {
 		requestText := formatRequest(*result.Request)
 
-		if err := b.sendMessage(b.workChatID, requestText); err != nil {
-			log.Println("send request to work chat:", err)
+		err := b.sendMessageWithKeyboard(
+			chatID,
+			requestText,
+			confirmationKeyboard(),
+		)
+		if err != nil {
+			log.Println("send request preview:", err)
 		}
+		return
 	}
 }
 
@@ -101,7 +129,7 @@ func (b *Bot) handleCommand(message *tgbotapi.Message) {
 	case "start":
 		err := b.sendMessageWithKeyboard(
 			chatID,
-			"Привет! Выберите направление:",
+			"Здравствуйте! Выберите направление:",
 			directionKeyboard(),
 		)
 		if err != nil {
@@ -111,7 +139,7 @@ func (b *Bot) handleCommand(message *tgbotapi.Message) {
 	case "chatid":
 		err := b.sendMessage(
 			chatID,
-			fmt.Sprintf("Chat ID: %d", chatID),
+			fmt.Sprintf("ChatID: %d", chatID),
 		)
 		if err != nil {
 			log.Println("send /chatid:", err)
@@ -123,11 +151,52 @@ func (b *Bot) handleCommand(message *tgbotapi.Message) {
 			"Доступные команды:\n"+
 				"/start — начать оформление заявки\n"+
 				"/chatid — узнать ID текущего чата\n"+
+				"/cancel — отменить текущую заявку\n"+
 				"/help — список команд",
 		)
 		if err != nil {
 			log.Println("send /help:", err)
 		}
+	case "cancel":
+		ok := b.requestService.CancelRequest(chatID)
+
+		if !ok {
+			if err := b.sendMessage(
+				chatID,
+				"У Вас нет активной заявки.",
+			); err != nil {
+				log.Println("send cancel:", err)
+			}
+
+			return
+		}
+
+		if err := b.sendMessage(
+			chatID,
+			"❌ Заявка отменена.\nДля создания новой заявки нажмите /start.",
+		); err != nil {
+			log.Println("send cancel confirm:", err)
+		}
+	}
+}
+
+func (b *Bot) handleContact(message *tgbotapi.Message) {
+	if message.Contact == nil {
+		return
+	}
+
+	chatID := message.Chat.ID
+
+	result := b.requestService.SetPhoneNumber(
+		chatID,
+		message.Contact.PhoneNumber,
+	)
+
+	if err := b.sendMessageAndRemoveKeyboard(
+		chatID,
+		result.Text,
+	); err != nil {
+		log.Println("send phone result:", err)
 	}
 }
 
@@ -141,17 +210,18 @@ func (b *Bot) handleCallback(update tgbotapi.Update) {
 	defer b.answerCallback(callback.ID)
 
 	chatID := callback.Message.Chat.ID
+	messageID := callback.Message.MessageID
 
 	if direction, ok := parseDirection(callback.Data); ok {
-		result := b.requestService.StartRequest(
-			chatID,
-			direction,
-		)
+		result := b.requestService.StartRequest(chatID, direction)
 
-		if err := b.sendMessageWithKeyboard(
-			chatID,
+		if err := b.removeInlineKeyboard(chatID, messageID); err != nil {
+			log.Println("remove direction keyboard:", err)
+		}
+
+		if err := b.sendMessageWithKeyboard(chatID,
 			result.Text,
-			addressKeyboard(),
+			addressKeyboard(direction),
 		); err != nil {
 			log.Println("send address keyboard:", err)
 		}
@@ -160,17 +230,90 @@ func (b *Bot) handleCallback(update tgbotapi.Update) {
 	}
 
 	if address, ok := parseAddress(callback.Data); ok {
-		result := b.requestService.SetAddress(
+		result := b.requestService.SetAddress(chatID, address)
+
+		if err := b.removeInlineKeyboard(chatID, messageID); err != nil {
+			log.Println("send address keyboard:", err)
+		}
+
+		if err := b.sendMessage(chatID, result.Text); err != nil {
+			log.Println("send address result:", err)
+		}
+	}
+
+	if callback.Data == CallbackRequestConfirm {
+		request, ok := b.requestService.ConfirmRequest(chatID)
+
+		if !ok {
+			if err := b.sendMessage(
+				chatID,
+				"Заявка уже была обработана или не найдена.",
+			); err != nil {
+				log.Println("send confirm error:", err)
+			}
+
+			return
+		}
+
+		requestText := formatRequest(*request)
+
+		if err := b.sendMessage(
+			b.workChatID,
+			requestText,
+		); err != nil {
+			log.Println("send request to work chat:", err)
+
+			return
+		}
+
+		b.requestService.FinishRequest(chatID)
+
+		if err := b.removeInlineKeyboard(
 			chatID,
-			address,
-		)
+			callback.Message.MessageID,
+		); err != nil {
+			log.Println("remove confirm keyboard:", err)
+		}
 
 		if err := b.sendMessage(
 			chatID,
-			result.Text,
+			"✅ Заявка отправлена.",
 		); err != nil {
-			log.Println("send address result:", err)
+			log.Println("send confirmation:", err)
 		}
+
+		return
+	}
+
+	if callback.Data == CallbackRequestCancel {
+		ok := b.requestService.CancelRequest(chatID)
+
+		if !ok {
+			if err := b.sendMessage(
+				chatID,
+				"Активная заявка не найдена.",
+			); err != nil {
+				log.Println("send cancel error:", err)
+			}
+
+			return
+		}
+
+		if err := b.removeInlineKeyboard(
+			chatID,
+			callback.Message.MessageID,
+		); err != nil {
+			log.Println("remove cancel keyboard:", err)
+		}
+
+		if err := b.sendMessage(
+			chatID,
+			"❌ Заявка отменена.",
+		); err != nil {
+			log.Println("send cancel confirmation:", err)
+		}
+
+		return
 	}
 }
 
@@ -191,6 +334,42 @@ func (b *Bot) sendMessageWithKeyboard(
 	msg.ReplyMarkup = keyboard
 
 	_, err := b.api.Send(msg)
+
+	return err
+}
+
+func (b *Bot) sendMessageWithReplyKeyboard(
+	chatID int64,
+	text string,
+	keyboard tgbotapi.ReplyKeyboardMarkup,
+) error {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ReplyMarkup = keyboard
+
+	_, err := b.api.Send(msg)
+
+	return err
+}
+
+func (b *Bot) sendMessageAndRemoveKeyboard(chatID int64, text string) error {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ReplyMarkup = tgbotapi.NewRemoveKeyboard(false)
+
+	_, err := b.api.Send(msg)
+
+	return err
+}
+
+func (b *Bot) removeInlineKeyboard(chatID int64, messageID int) error {
+	edit := tgbotapi.NewEditMessageReplyMarkup(
+		chatID,
+		messageID,
+		tgbotapi.InlineKeyboardMarkup{
+			InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{},
+		},
+	)
+
+	_, err := b.api.Send(edit)
 
 	return err
 }
@@ -222,9 +401,9 @@ func directionName(direction domain.Direction) string {
 func addressName(address domain.Address) string {
 	switch address {
 	case domain.AddressPoeticheskiy:
-		return "Поэтический"
+		return "Поэтический б-р д.4"
 	case domain.AddressSikeirosa:
-		return "Сикейроса"
+		return "ул. Сикейроса д.14"
 	default:
 		return "Неизвестно"
 	}
@@ -232,13 +411,13 @@ func addressName(address domain.Address) string {
 
 func formatRequest(req domain.Request) string {
 	return fmt.Sprintf(
-		"Новая заявка\n\n"+
-			"Направление: %s\n"+
-			"Адрес: %s\n"+
-			"Имя: %s\n"+
-			"Телефон: %s\n"+
-			"Автомобиль: %s\n"+
-			"Проблема: %s",
+		"🚘 НОВАЯ ЗАЯВКА\n\n"+
+			"🔧 Направление: %s\n"+
+			"📍 Адрес: %s\n"+
+			"👤 Имя: %s\n"+
+			"📞 Телефон: %s\n"+
+			"🚗 Автомобиль: %s\n"+
+			"📝 Проблема: %s\n",
 		directionName(req.Direction),
 		addressName(req.Address),
 		req.Name,

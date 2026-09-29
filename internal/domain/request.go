@@ -28,12 +28,13 @@ type Request struct {
 type UserState string
 
 const (
-	StateNone            UserState = ""
-	StateWaitAddress     UserState = "wait_address"
-	StateWaitName        UserState = "wait_name"
-	StateWaitPhoneNumber UserState = "wait_phone_number"
-	StateWaitCar         UserState = "wait_car"
-	StateWaitProblem     UserState = "wait_problem"
+	StateNone             UserState = ""
+	StateWaitAddress      UserState = "wait_address"
+	StateWaitName         UserState = "wait_name"
+	StateWaitPhoneNumber  UserState = "wait_phone_number"
+	StateWaitCar          UserState = "wait_car"
+	StateWaitProblem      UserState = "wait_problem"
+	StateWaitConfirmation UserState = "wait_confirmation"
 )
 
 type UserSession struct {

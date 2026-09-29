@@ -17,6 +17,11 @@ const (
 	CallbackAddressSikeirosa    = "address:sikeirosa"
 )
 
+const (
+	CallbackRequestConfirm = "request:confirm"
+	CallbackRequestCancel  = "request:cancel"
+)
+
 func parseDirection(data string) (domain.Direction, bool) {
 	switch data {
 	case CallbackDirectionService:
